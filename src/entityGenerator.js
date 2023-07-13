@@ -10,9 +10,7 @@ async function generateEntities() {
 SELECT table_name
 FROM information_schema.tables
 WHERE table_schema = 'public' 
-AND table_type = 'BASE TABLE'
-and table_name='logs'
-;
+AND table_type = 'BASE TABLE';
     `,
     { type: Sequelize.QueryTypes.SELECT }
   );
@@ -35,7 +33,7 @@ and table_name='logs'
 
     for (const column of columns) {
       const columnName = column.column_name;
-      if ( columnName !== "expiration_date") {
+      if (columnName !== "expiration_date") {
         const maxLength = column.character_maximum_length;
         const columnType = mapColumnType(column.data_type, maxLength);
         const allowNull = column.is_nullable === "YES";
@@ -95,11 +93,24 @@ and table_name='logs'
                 data_type,
               } = foreignKey[0];
 
+              const tipoASociacao = await sequelize.query(
+                `
+                SELECT COUNT(*) AS total_rows
+                FROM ${tableName} a
+                JOIN ${foreign_table_name} b 
+                ON b.${foreign_column_name} = a.${column_name}
+                GROUP BY a.${column_name}, b.${foreign_column_name}
+                ORDER BY total_rows DESC;
+              `,
+                { type: Sequelize.QueryTypes.SELECT }
+              );
+
               foreignKeys[column_name] = {
                 foreign_table_name,
                 foreign_column_name,
                 is_nullable,
                 data_type,
+                tableName,
               };
             }
           }
@@ -111,9 +122,10 @@ and table_name='logs'
     }
 
     const formateNome = transformarNome(tableName);
-
+    const nomeArquivo = toCamelCase(tableName);
+    fs.mkdirSync(`./entities/${nomeArquivo}`);
     const entityTemplate = `
-      import { Table, Column, Model, DataTypes, ForeignKey } from 'sequelize-typescript';
+      import { Table, Column, Model, DataTypes, ForeignKey,  BelongsTo } from 'sequelize-typescript';
       ${generateImportStatements(foreignKeys)}
 
       @Table({
@@ -124,9 +136,28 @@ and table_name='logs'
 
         ${generateForeignKeyDecorators(foreignKeys)}
       }
+
+    `;
+    fs.writeFileSync(
+      `./entities/${nomeArquivo}/${nomeArquivo}.entity.ts`,
+      entityTemplate
+    );
+
+    const provider = `
+    import { ${formateNome} } from './${nomeArquivo}.entity';
+
+    export const ${nomeArquivo}Provider = [
+      {
+        provide: ${tableName.toUpperCase()}_REPOSITORY,
+        useValue:  ${formateNome},
+      },
+    ];
     `;
 
-    fs.writeFileSync(`./entities/${formateNome}.entity.ts`, entityTemplate);
+    fs.writeFileSync(
+      `./entities/${nomeArquivo}/${nomeArquivo}.provider.ts`,
+      provider
+    );
   }
 }
 
@@ -220,6 +251,11 @@ function transformarNome(nome) {
 
   return resultado.charAt(0).toUpperCase() + resultado.slice(1);
 }
+function toCamelCase(str) {
+  return str.replace(/_([a-z])/g, function (match, char) {
+    return char.toUpperCase();
+  });
+}
 
 function generateImportStatements(foreignKeys) {
   const importStatements = Object.values(foreignKeys)
@@ -277,7 +313,10 @@ function getForeignKeyDecorator(
   @Column({
     type: ${columnType}${allowNull},
   })
-  ${columnName}: ${getColumnDataType(columnType)};`;
+  ${columnName}: ${getColumnDataType(columnType)};\n
+  @BelongsTo(() => ${transformarNome(foreign_table_name)})
+  ${columnName}_id: ${getColumnDataType(columnType)};\n
+  `;
 }
 
 function isEmpty(params) {

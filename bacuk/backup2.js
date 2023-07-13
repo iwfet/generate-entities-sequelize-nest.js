@@ -1,15 +1,18 @@
-const fs = require("fs");
-const { Sequelize, DataTypes } = require("sequelize");
-const sequelize = require("./sequelize");
+import fs from "fs";
+import { Sequelize, DataTypes } from "sequelize";
+import sequelize from "../sequelize.js";
 
 // Função para gerar entidades
 async function generateEntities() {
   const tables = await sequelize.query(
     `
-    SELECT table_name
-    FROM information_schema.tables
-    WHERE table_schema = 'public' 
-    AND table_type = 'BASE TABLE';
+    
+SELECT table_name
+FROM information_schema.tables
+WHERE table_schema = 'public' 
+AND table_type = 'BASE TABLE'
+and table_name='logs'
+;
     `,
     { type: Sequelize.QueryTypes.SELECT }
   );
@@ -32,50 +35,46 @@ async function generateEntities() {
 
     for (const column of columns) {
       const columnName = column.column_name;
-      const maxLength = column.character_maximum_length;
-      const columnType = mapColumnType(column.data_type, maxLength);
-      const allowNull = column.is_nullable === "YES";
-      const defaultValue = column.column_default;
-      const constraintType = column.constraint_type;
+      if ( columnName !== "expiration_date") {
+        const maxLength = column.character_maximum_length;
+        const columnType = mapColumnType(column.data_type, maxLength);
+        const allowNull = column.is_nullable === "YES";
+        const defaultValue = column.column_default;
+        const constraintType = column.constraint_type;
 
-      const columnDefinition = {
-        type: columnType,
-      };
+        const columnDefinition = {
+          type: columnType,
+        };
 
-      if (constraintType !== "FOREIGN KEY") {
-        if (constraintType !== "PRIMARY KEY") {
-          columnDefinition.allowNull = allowNull;
-        }
-
-        if (defaultValue !== null && defaultValue !== undefined) {
-          if (constraintType !== "PRIMARY KEY") {
-            const value = getColumnDataType(columnType);
-            if (value === "number") {
-              columnDefinition.defaultValue = Number(defaultValue);
-            } else if (value === "boolean") {
-              columnDefinition.defaultValue = Boolean(defaultValue);
-            } else if (value === "Date") {
-              columnDefinition.defaultValue = DataTypes.NOW;
-            } else if (value === "string") {
-              columnDefinition.defaultValue = defaultValue;
+        if (constraintType !== "FOREIGN KEY") {
+          if (constraintType !== "PRIMARY KEY" || constraintType !== "UNIQUE") {
+            columnDefinition.allowNull = allowNull;
+          }
+          if (isEmpty(defaultValue)) {
+            if (constraintType !== "PRIMARY KEY") {
+              const value = getColumnDataType(columnType);
+              if (value === "number") {
+                columnDefinition.defaultValue = Number(defaultValue);
+              } else if (value === "boolean") {
+                columnDefinition.defaultValue = Boolean(defaultValue);
+              } else if (value === "Date") {
+                columnDefinition.defaultValue = DataTypes.NOW;
+              } else if (value === "string") {
+                columnDefinition.defaultValue = defaultValue;
+              }
             }
           }
         }
-      }
 
-      if (
-        constraintType &&
-        constraintType !== null &&
-        constraintType !== undefined
-      ) {
-        if (constraintType === "PRIMARY KEY") {
-          columnDefinition.primaryKey = true;
-          columnDefinition.autoIncrement = true;
-        } else if (constraintType === "UNIQUE") {
-          columnDefinition.unique = true;
-        } else if (constraintType === "FOREIGN KEY") {
-          const foreignKey = await sequelize.query(
-            `
+        if (isEmpty(constraintType)) {
+          if (constraintType === "PRIMARY KEY") {
+            columnDefinition.primaryKey = true;
+            columnDefinition.autoIncrement = true;
+          } else if (constraintType === "UNIQUE") {
+            columnDefinition.unique = true;
+          } else if (constraintType === "FOREIGN KEY") {
+            const foreignKey = await sequelize.query(
+              `
             SELECT kcu.column_name, ccu.table_name AS foreign_table_name, ccu.column_name AS foreign_column_name, c.is_nullable, c.data_type
             FROM information_schema.key_column_usage kcu
             JOIN information_schema.constraint_column_usage ccu ON kcu.constraint_name = ccu.constraint_name
@@ -84,29 +83,31 @@ async function generateEntities() {
             WHERE kcu.table_name = '${tableName}' AND kcu.column_name = '${columnName}'
             AND tc.constraint_type ='FOREIGN KEY';
           `,
-            { type: Sequelize.QueryTypes.SELECT }
-          );
+              { type: Sequelize.QueryTypes.SELECT }
+            );
 
-          if (foreignKey.length > 0) {
-            const {
-              column_name,
-              foreign_table_name,
-              foreign_column_name,
-              is_nullable,
-              data_type,
-            } = foreignKey[0];
-            
-            foreignKeys[column_name] = {
-              foreign_table_name,
-              foreign_column_name,
-              is_nullable,
-              data_type,
-            };
+            if (foreignKey.length > 0) {
+              const {
+                column_name,
+                foreign_table_name,
+                foreign_column_name,
+                is_nullable,
+                data_type,
+              } = foreignKey[0];
+
+              foreignKeys[column_name] = {
+                foreign_table_name,
+                foreign_column_name,
+                is_nullable,
+                data_type,
+              };
+            }
           }
         }
+        if (constraintType !== "FOREIGN KEY") {
+          attributes[columnName] = columnDefinition;
+        }
       }
-
-      attributes[columnName] = columnDefinition;
     }
 
     const formateNome = transformarNome(tableName);
@@ -224,9 +225,9 @@ function generateImportStatements(foreignKeys) {
   const importStatements = Object.values(foreignKeys)
     .map(
       ({ foreign_table_name }) =>
-        `import { ${transformarNome(foreign_table_name)} } from './${transformarNome(
+        `import { ${transformarNome(
           foreign_table_name
-        )}.entity';`
+        )} } from './${transformarNome(foreign_table_name)}.entity';`
     )
     .join("\n");
 
@@ -246,7 +247,10 @@ function generateAttributeDecorators(attributes) {
 function generateForeignKeyDecorators(foreignKeys) {
   const foreignKeyDecorators = Object.entries(foreignKeys)
     .map(
-      ([columnName, { foreign_table_name, foreign_column_name, is_nullable, data_type }]) =>
+      ([
+        columnName,
+        { foreign_table_name, foreign_column_name, is_nullable, data_type },
+      ]) =>
         getForeignKeyDecorator(
           columnName,
           foreign_table_name,
@@ -269,13 +273,14 @@ function getForeignKeyDecorator(
 ) {
   const columnType = mapColumnType(data_type);
   const allowNull = is_nullable === "YES" ? ", allowNull: true" : "";
-  return `@ForeignKey(() => ${transformarNome(
-    foreign_table_name
-  )})
+  return `@ForeignKey(() => ${transformarNome(foreign_table_name)})
   @Column({
     type: ${columnType}${allowNull},
   })
   ${columnName}: ${getColumnDataType(columnType)};`;
 }
 
+function isEmpty(params) {
+  return params && params !== null && params !== undefined;
+}
 generateEntities();
